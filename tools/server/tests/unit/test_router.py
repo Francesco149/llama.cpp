@@ -366,6 +366,37 @@ def test_router_memory_margin_measures_models():
     assert _get_model_memory(MODEL_B)["effective"] is None
 
 
+def test_router_memory_margin_counts_mmproj():
+    """the measured memory of a multimodal model includes its projector"""
+    global server
+    preset_path = os.path.join(TMP_DIR, "test_preset_mmproj.ini")
+    with open(preset_path, "w") as f:
+        f.write(
+            "[with-mmproj]\n"
+            "hf-repo = ggml-org/tinygemma3-GGUF:Q8_0\n"
+            "[without-mmproj]\n"
+            "hf-repo = ggml-org/tinygemma3-GGUF:Q8_0\n"
+            "no-mmproj = true\n"
+        )
+
+    server.models_preset = preset_path
+    server.models_memory_margin = 1
+    try:
+        server.start()
+
+        def total(mem: dict) -> int:
+            return sum(d["model"] + d["context"] + d["compute"] for d in mem["devices"])
+
+        with_mmproj    = _wait_for_memory_status("with-mmproj",    {"measured", "failed"})
+        without_mmproj = _wait_for_memory_status("without-mmproj", {"measured", "failed"})
+        assert with_mmproj["status"] == "measured"
+        assert without_mmproj["status"] == "measured"
+        for key in ("min", "max"):
+            assert total(with_mmproj[key]) > total(without_mmproj[key])
+    finally:
+        os.remove(preset_path)
+
+
 def test_router_memory_margin_evicts_lru():
     """with a margin larger than any device, two models never fit together: the idle one is unloaded"""
     global server

@@ -12,6 +12,7 @@
 #include "fit.h"
 #include "llama.h"
 #include "log.h"
+#include "mtmd.h"
 
 #include <atomic>
 #include <clocale>
@@ -439,10 +440,54 @@ static int server_run_measure(common_params & params, server_role & role, common
 
     const std::string model_name = params.model.get_name();
 
-    // TODO: mmproj is not in llama_get_memory_breakdown, a multimodal model is underestimated
+    // mmproj is not in llama_get_memory_breakdown, measure it the same way as the model load does
+    std::map<ggml_backend_dev_t, size_t> mmproj_mem;
+    if (!params.mmproj.path.empty()) {
+        mtmd_context_params mparams = mtmd_context_params_default();
+        mparams.use_gpu          = params.mmproj_use_gpu;
+        mparams.device           = params.mmproj_device;
+        mparams.n_threads        = params.cpuparams.n_threads;
+        mparams.flash_attn_type  = params.flash_attn_type;
+        mparams.warmup           = params.warmup;
+        mparams.image_min_tokens = params.image_min_tokens;
+        mparams.image_max_tokens = params.image_max_tokens;
+        mparams.batch_max_tokens = params.mtmd_batch_max_tokens;
+        mmproj_mem = mtmd_get_memory_usage(params.mmproj.path.c_str(), mparams).backend_mem_usage;
+        if (mmproj_mem.empty()) {
+            SRV_WRN("failed to measure mmproj memory for model name=%s, it is not counted\n", model_name.c_str());
+        }
+        // the model load adds mmproj to the --fit margins, so n_ctx_max must leave room for it too
+        if (params.fit_params) {
+            for (const auto & [dev, size] : mmproj_mem) {
+                for (size_t i = 0; i < ggml_backend_dev_count() && i < params.fit_params_target.size(); i++) {
+                    if (ggml_backend_dev_get(i) == dev) {
+                        params.fit_params_target[i] += size;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // add mmproj to the row of its device, or to the host row for the CPU
+    auto add_mmproj = [&mmproj_mem](std::vector<common_memory_breakdown_row> & rows) {
+        for (const auto & [dev, size] : mmproj_mem) {
+            const bool on_host = ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_CPU;
+            for (auto & row : rows) {
+                if (on_host ? row.kind == common_memory_breakdown_row::HOST
+                            : row.kind == common_memory_breakdown_row::DEVICE && row.name == ggml_backend_dev_name(dev)) {
+                    row.model += size;
+                    break;
+                }
+            }
+        }
+    };
+
     json payload;
     try {
         common_memory_reports m = common_measure_memory(params);
+        add_mmproj(m.info_min);
+        add_mmproj(m.info_max);
         payload = {
             {"result",      "measured"},
             {"n_ctx_train", m.n_ctx_train},
