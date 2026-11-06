@@ -8145,6 +8145,42 @@ static void test_prompt_parts() {
     assert_equals(false, prompt.parts[0].is_input);
 }
 
+// Templates with a dedicated handler must set message delimiters, or the server cannot place context checkpoints at user messages
+static void test_specialized_message_delimiters() {
+    LOG_DBG("%s\n", __func__);
+
+    common_chat_msg system_msg;
+    system_msg.role    = "system";
+    system_msg.content = "You are a helpful assistant.";
+
+    for (const char * path : {
+             "models/templates/LFM2-8B-A1B.jinja",
+             "models/templates/LFM2.5-Instruct.jinja",
+             "models/templates/LFM2.5-8B-A1B.jinja",
+         }) {
+        auto tmpls = read_templates(path);
+
+        common_chat_templates_inputs inputs;
+        inputs.messages              = { system_msg, message_user, message_assist, message_user };
+        inputs.add_generation_prompt = true;
+        auto params = common_chat_templates_apply(tmpls.get(), inputs);
+        const auto prompt = params.prompt.str();
+
+        std::string user_delim;
+        std::string assistant_delim;
+        for (const auto & d : params.message_delimiters.delimiters) {
+            if (d.role == COMMON_CHAT_ROLE_USER) {
+                user_delim = d.delimiter;
+            } else if (d.role == COMMON_CHAT_ROLE_ASSISTANT) {
+                assistant_delim = d.delimiter;
+            }
+        }
+        assert_equals(std::string("<|im_start|>user"), user_delim);
+        assert_equals(std::string("<|im_start|>assistant"), assistant_delim);
+        assert_equals(prompt.rfind("<|im_start|>user\nHey there!"), prompt.rfind(user_delim));
+    }
+}
+
 static void test_chat_session() {
     LOG_DBG("%s\n", __func__);
     auto tmpls = read_templates("models/templates/Qwen3.5-4B.jinja");
@@ -8532,6 +8568,7 @@ int main(int argc, char ** argv) {
         test_deepseek_v4_tool_result_ordering();
         test_deepseek_v4_1_message_fields();
         test_template_generation_prompt();
+        test_specialized_message_delimiters();
         test_reasoning_effort_caps();
         test_prompt_parts();
         test_chat_session();
